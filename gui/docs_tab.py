@@ -1,9 +1,8 @@
-# ui/docs_tab.py (lub gdzie masz DocsTab)
 import tkinter as tk
 from tkinter import ttk, filedialog
 from assets.docs_text import DOCS_TEXT
 from .base import BaseTab
-from .markdown_viewer import MarkdownViewer
+from .markdown_viewer import MarkdownViewer, normalize_latex_delims
 
 class DocsTab(BaseTab):
     def build(self):
@@ -17,16 +16,13 @@ class DocsTab(BaseTab):
         ttk.Button(bar, text="Kopiuj wszystko", command=self._copy_all).pack(side="right")
         ttk.Button(bar, text="Zapisz do pliku…", command=self._save_file).pack(side="right", padx=(0,8))
 
-        # ——— UŻYJ VIEWERA ———
         self.viewer = MarkdownViewer(self.tab)
         self.viewer.pack(fill="both", expand=True)
 
-        # Render na starcie
-        self.viewer.render(DOCS_TEXT)
+
+        self.viewer.render(normalize_latex_delims(DOCS_TEXT))
 
     def _search(self, from_start=False):
-        # proste „find” po plain-tekście w Text; działa też z obrazkami,
-        # bo markery pozycji nie dotyczą obrazów – przeszukujemy to co jest tekstem
         t = self.viewer.text
         t.tag_remove("hit", "1.0", "end")
         q = self.doc_query.get().strip()
