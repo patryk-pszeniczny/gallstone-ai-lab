@@ -1,6 +1,6 @@
 # Gallstone AI Lab 🧪
 
-Python project for detecting gallstones (cholelithiasis) from clinical-style data using two approaches: a classic MLP model and a fuzzy-logic engine. On top of that there’s a small GUI so you don’t have to run everything from the terminal. This is a **study/demo** repo — good for uni, presentations, showing code structure. Not medical software.
+Python project for detecting gallstones (cholelithiasis) from clinical-style data using two approaches: a classic MLP model and a fuzzy-logic engine. On top of that there’s a small GUI so you don’t have to run everything from the terminal. This is a **study/demo** repo  good for uni, presentations, showing code structure. Not medical software.
 
 ---
 
