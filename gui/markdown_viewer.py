@@ -6,7 +6,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from matplotlib.figure import Figure
-from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.backends.backend_agg import FigureCanvasAgg  # noqa: F401  # kept for compatibility
 
 try:
     from PIL import Image, ImageTk
@@ -21,8 +21,10 @@ _LATEX_DELIM_FIXES = [
     (re.compile(r"\\\\\]"), r"\\]"),   # \\]  -> \]
     (re.compile(r"\\\\\("), r"\\("),   # \\(  -> \(
     (re.compile(r"\\\\\)"), r"\\)"),   # \\)  -> \)
-    (re.compile(r"(?<!\\)\\{2}(?![\\\[\]\(\)\$])"), r"\\"),  # ogólne: podwójny \ -> pojedynczy \ (ostrożnie)
+    # ogólne: podwójny \ -> pojedynczy \ (ale nie przed \[ \] \( \) $)
+    (re.compile(r"(?<!\\)\\{2}(?![\\\[\]\(\)\$])"), r"\\"),
 ]
+
 
 def normalize_latex_delims(text: str) -> str:
     """Naprawia typowe zdublowania backslashy w raw-stringach."""
@@ -33,20 +35,116 @@ def normalize_latex_delims(text: str) -> str:
 
 
 # ---------- SANITYZACJA WYRAŻENIA DLA MATHTEXT ----------
+# ---------- SANITYZACJA WYRAŻENIA DLA MATHTEXT ----------
+# ---------- SANITYZACJA WYRAŻENIA DLA MATHTEXT ----------
 _SANITIZERS = [
     (re.compile(r"\\text\s*\{([^}]*)\}"), r"\\mathrm{\1}"),
     (re.compile(r"\\operatorname\s*\{([^}]*)\}"), r"\\mathrm{\1}"),
     (re.compile(r"\\argmin\b"), r"\\mathrm{argmin}"),
     (re.compile(r"\\argmax\b"), r"\\mathrm{argmax}"),
     (re.compile(r"\\mathbf\s*\{([^}]*)\}"), r"\\boldsymbol{\1}"),
+
+    # \mathbb{R} -> \mathcal{R} (mathtext to ogarnia)
+    (re.compile(r"\\mathbb\s*\{([^}]*)\}"), r"\\mathcal{\1}"),
+
+    # \dots -> \ldots
+    (re.compile(r"\\dots\b"), r"\\ldots"),
+
+    # Style, których mathtext nie zna – wycinamy:
+    (re.compile(r"\\displaystyle\b"), r""),
+    (re.compile(r"\\textstyle\b"), r""),
+    (re.compile(r"\\scriptstyle\b"), r""),
+    (re.compile(r"\\scriptscriptstyle\b"), r""),
+
+    # --- NOWE: aliasy / symbole, które rozwalają mathtext ---
+
+    # \le / \ge -> pełne formy \leq / \geq (te są wspierane)
+    (re.compile(r"\\le(?![A-Za-z])"), r"\\leq"),
+    (re.compile(r"\\ge(?![A-Za-z])"), r"\\geq"),
+    (re.compile(r"\\begin\s*\{cases\}"), r""),
+    (re.compile(r"\\end\s*\{cases\}"), r""),
+
+    # \* (np. y^\*) -> zwykła gwiazdka (y^*)
+    (re.compile(r"\\\*"), r"*"),
 ]
 
+
+def _insert_math(self, expr: str, block: bool):
+    # specjalny przypadek: środowisko 'cases' – mathtext go nie obsługuje
+    if r"\begin{cases}" in expr:
+        self._insert_cases_math(expr, block)
+        return
+
+    if not PIL_OK:
+        # fallback: nie mamy PIL, pokazujemy surowy tekst
+        self.text.insert("end", f"[LaTeX] {expr}")
+        if block:
+            self.text.insert("end", "\n")
+        return
+
+    # 1) sanityzacja wyrażenia (bez \begin{cases}, bo to już obsłużyliśmy)
+    expr = sanitize_math(expr)
+
+    # 2) zbuduj figurę jak wcześniej
+    base_size = (4.0, 1.6) if block else (2.4, 1.0)
+    dpi = 220
+
+    try:
+        fig = Figure(figsize=base_size, dpi=dpi)
+        ax = fig.add_axes([0, 0, 1, 1])
+        ax.axis("off")
+
+        to_draw = rf"${expr}$"
+        fontsize = 18 if block else 14
+        ax.text(0.5, 0.5, to_draw, ha="center", va="center", fontsize=fontsize)
+
+        buf = io.BytesIO()
+        fig.savefig(
+            buf,
+            format="png",
+            dpi=dpi,
+            bbox_inches="tight",
+            pad_inches=0.02,
+            transparent=True,
+        )
+        buf.seek(0)
+
+        img = Image.open(buf).convert("RGBA")
+        bbox = img.getbbox()
+        if bbox:
+            img = img.crop(bbox)
+
+        tkimg = ImageTk.PhotoImage(img)
+        self._images.append(tkimg)
+        self.text.image_create("end", image=tkimg)
+
+        if block:
+            self.text.insert("end", "\n")
+
+    except Exception as e:
+        self.text.insert("end", f"[LaTeX render error] {e}\n")
+
+
 def sanitize_math(expr: str) -> str:
-    s = expr.replace("\\\\", "\\")
+    """
+    Czyści wyrażenie z konstrukcji, których mathtext nie obsługuje
+    lub które sprawiają problemy. Usuwa m.in. \\displaystyle,
+    zamienia \\text -> \\mathrm, \\le -> \\leq, \\ge -> \\geq,
+    \\* -> * itd.
+
+    Dodatkowo spłaszcza nowe linie, bo mathtext nie toleruje '\\n'
+    wewnątrz $...$.
+    """
+    # mathtext NIE lubi znaków nowej linii – zamieniamy na spacje:
+    s = expr.replace("\n", " ")
+
+    # ujednolicenie podwójnych backslashy (\\ -> \)
+    # (mathtext i tak nie wspiera \\ jako „newline”)
+    s = s.replace("\\\\", "\\")
+
     for pat, rep in _SANITIZERS:
         s = pat.sub(rep, s)
     return s
-
 
 # ---------- VIEWER ----------
 class MarkdownViewer(ttk.Frame):
@@ -54,7 +152,7 @@ class MarkdownViewer(ttk.Frame):
     Lekki renderer Markdown + LaTeX (mathtext) do Tkinter Text.
     Obsługuje:
       - nagłówki #..###, listy, blockquote, hr, code fences, inline code;
-      - LaTeX: bloki \[ ... \], $$ ... $$ oraz inline: \( ... \), $ ... $.
+      - LaTeX: bloki \\[ ... \\], $$ ... $$ oraz inline: \\( ... \\), $ ... $.
     """
 
     # Regexy do tokenizacji wierszowej
@@ -66,8 +164,10 @@ class MarkdownViewer(ttk.Frame):
 
     # Bloki LaTeX w liniach (pełne wiersze)
     _RE_BLOCK_LATEX_START = re.compile(r"^\s*(\\\[|\$\$)\s*")
-    _RE_BLOCK_LATEX_END   = {r"\[": re.compile(r"(.*)\\\]\s*$"),
-                             "$$":  re.compile(r"(.*)\$\$\s*$")}
+    _RE_BLOCK_LATEX_END = {
+        r"\[": re.compile(r"(.*)\\\]\s*$"),
+        "$$": re.compile(r"(.*)\$\$\s*$"),
+    }
 
     def __init__(self, master):
         super().__init__(master)
@@ -193,7 +293,7 @@ class MarkdownViewer(ttk.Frame):
             # --- blockquote ---
             mb = self._RE_BLOCKQUOTE.match(line)
             if mb:
-                self._insert_emphasis(mb.group(1), extra_tags=("blockquote",))
+                self._insert_with_inline_math(mb.group(1), extra_tags=("blockquote",))
                 self.text.insert("end", "\n")
                 i += 1
                 continue
@@ -202,7 +302,8 @@ class MarkdownViewer(ttk.Frame):
             ml = self._RE_LIST.match(line)
             if ml:
                 self.text.insert("end", "• ", ("li",))
-                self._insert_emphasis(ml.group(1), extra_tags=("li",))
+                # ważne: obsługujemy inline LaTeX również w listach
+                self._insert_with_inline_math(ml.group(1), extra_tags=("li",))
                 self.text.insert("end", "\n")
                 i += 1
                 continue
@@ -248,12 +349,12 @@ class MarkdownViewer(ttk.Frame):
             start = i + m.start()
             if start > i:
                 out.append((False, text[i:start]))
-            m2 = re.search(r"`", text[start+1:])
+            m2 = re.search(r"`", text[start + 1 :])
             if not m2:
                 out.append((False, text[start:]))
                 break
             end = start + 1 + m2.start()
-            out.append((True, text[start+1:end]))
+            out.append((True, text[start + 1 : end]))
             i = end + 1
         return out
 
@@ -268,7 +369,9 @@ class MarkdownViewer(ttk.Frame):
 
         # szybkie findery
         bold_re = re.compile(r"(\*\*|__)(.+?)\1")
-        ital_re = re.compile(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)|(?<!_)_(?!_)(.+?)(?<!_)_(?!_)")
+        ital_re = re.compile(
+            r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)|(?<!_)_(?!_)(.+?)(?<!_)_(?!_)"
+        )
 
         while i < n:
             # Szukaj najbliższego dopasowania (bold lub italic)
@@ -277,8 +380,10 @@ class MarkdownViewer(ttk.Frame):
 
             # wybierz wcześniejsze wystąpienie
             cand = []
-            if b: cand.append(("bold", b.start(), b))
-            if it: cand.append(("italic", it.start(), it))
+            if b:
+                cand.append(("bold", b.start(), b))
+            if it:
+                cand.append(("italic", it.start(), it))
             if not cand:
                 # reszta jako zwykły tekst
                 if i < n:
@@ -302,11 +407,13 @@ class MarkdownViewer(ttk.Frame):
                 self.text.insert("end", inner, ("italic",) + tuple(extra_tags))
                 i = m.end()
 
-    def _insert_with_inline_math(self, text: str):
+    def _insert_with_inline_math(self, text: str, extra_tags=()):
         """
         Dzieli tekst na zwykłe fragmenty i fragmenty LaTeX dla:
-          - \( ... \)
+          - \\( ... \\)
           - $ ... $   (pojedyncze $; ignorujemy $$ tutaj)
+
+        'extra_tags' pozwala np. zachować styl listy ('li') albo blockquote.
         """
         parts: List[Tuple[bool, str]] = []
         i = 0
@@ -316,8 +423,10 @@ class MarkdownViewer(ttk.Frame):
             m_dol = re.search(r"(?<!\$)\$(?!\$)", text[i:])  # pojedynczy $
             # wybierz pierwsze w kolejności
             cand = []
-            if m_par: cand.append(("par", i + m_par.start()))
-            if m_dol: cand.append(("dol", i + m_dol.start()))
+            if m_par:
+                cand.append(("par", i + m_par.start()))
+            if m_dol:
+                cand.append(("dol", i + m_dol.start()))
             if not cand:
                 parts.append((False, text[i:]))
                 break
@@ -326,37 +435,38 @@ class MarkdownViewer(ttk.Frame):
                 parts.append((False, text[i:pos]))
             if kind == "par":
                 # szukaj zamknięcia \)
-                m_end = re.search(r"\\\)", text[pos+2:])
+                m_end = re.search(r"\\\)", text[pos + 2 :])
                 if not m_end:
                     # brak końca – traktuj jako zwykły tekst
                     parts.append((False, text[pos:]))
                     break
                 end = pos + 2 + m_end.start()
-                expr = text[pos+2:end]
+                expr = text[pos + 2 : end]
                 parts.append((True, ("par", expr)))
                 i = end + 2
             else:
                 # pojedynczy $ ... $
-                m_end = re.search(r"(?<!\$)\$(?!\$)", text[pos+1:])
+                m_end = re.search(r"(?<!\$)\$(?!\$)", text[pos + 1 :])
                 if not m_end:
                     parts.append((False, text[pos:]))
                     break
                 end = pos + 1 + m_end.start()
-                expr = text[pos+1:end]
+                expr = text[pos + 1 : end]
                 parts.append((True, ("dol", expr)))
                 i = end + 1
 
         # wstaw
         for is_math, payload in parts:
             if not is_math:
-                self._insert_emphasis(payload)
+                self._insert_emphasis(payload, extra_tags=extra_tags)
             else:
-                kind, expr = payload
+                _kind, expr = payload
                 self._insert_math(expr, block=False)
 
     # ---------- render LaTeX jako obraz ----------
     def _insert_math(self, expr: str, block: bool):
         if not PIL_OK:
+            # fallback: nie mamy PIL, pokazujemy surowy tekst
             self.text.insert("end", f"[LaTeX] {expr}")
             if block:
                 self.text.insert("end", "\n")
@@ -365,8 +475,11 @@ class MarkdownViewer(ttk.Frame):
         # 1) sanityzacja poleceń nieszczególnie lub średnio wspieranych przez mathtext
         expr = sanitize_math(expr)
 
+        # 1.5) Zlikwiduj nowe linie w wyrażeniu (mathtext nie lubi '\n' w środku $...$)
+        #      i zredukuj nadmiarowe spacje:
+        expr = " ".join(expr.split())
+
         # 2) zbuduj figurę wystarczająco dużą, by nic nie zostało ucięte
-        #    (później i tak przytniemy do 'tight' w savefig)
         base_size = (4.0, 1.6) if block else (2.4, 1.0)  # szer., wys. w calach
         dpi = 220
 
@@ -375,20 +488,27 @@ class MarkdownViewer(ttk.Frame):
             ax = fig.add_axes([0, 0, 1, 1])
             ax.axis("off")
 
-            # \displaystyle tylko dla bloków; inline bez niego (mniej „wysokie”)
-            to_draw = rf"$\displaystyle {expr}$" if block else rf"${expr}$"
-            ax.text(0.5, 0.5, to_draw, ha="center", va="center", fontsize=14)
+            # UWAGA: NIE dodajemy już \displaystyle – mathtext tego nie zna
+            to_draw = rf"${expr}$"
+
+            fontsize = 8 if block else 6
+            ax.text(0.5, 0.5, to_draw, ha="center", va="center", fontsize=fontsize)
 
             buf = io.BytesIO()
             # KLUCZ: savefig + bbox_inches='tight' -> brak obcinania formuły
-            fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight",
-                        pad_inches=0.02, transparent=True)
+            fig.savefig(
+                buf,
+                format="png",
+                dpi=dpi,
+                bbox_inches="tight",
+                pad_inches=0.02,
+                transparent=True,
+            )
             buf.seek(0)
 
-            from PIL import Image
             img = Image.open(buf).convert("RGBA")
 
-            # (opcjonalne) dodatkowe ucinanie przez PIL, zwykle niepotrzebne po 'tight'
+            # dodatkowe ucinanie przez PIL (zwykle niepotrzebne po 'tight', ale nie szkodzi)
             bbox = img.getbbox()
             if bbox:
                 img = img.crop(bbox)
@@ -403,4 +523,3 @@ class MarkdownViewer(ttk.Frame):
         except Exception as e:
             # pokaż błąd, ale nie zatrzymuj renderu reszty dokumentu
             self.text.insert("end", f"[LaTeX render error] {e}\n")
-

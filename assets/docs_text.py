@@ -1,1331 +1,590 @@
 DOCS_TEXT = r'''\
-# GallStone MLP — Dokumentacja techniczna (pełna)
+# Gallstone AI Lab – dokumentacja techniczna
 
-> **Wersja:** Stan na 2025-10-24. Aplikacja: MLP (numpy only) + Tkinter/ttk GUI + matplotlib, bez scikit-learn.
+## 1. Cel projektu i kontekst medyczny
 
+Projekt **Gallstone AI Lab** służy do **wspomagania oceny ryzyka kamicy pęcherzyka żółciowego (cholelithiasis)** na podstawie danych klinicznych pacjenta. Aplikacja **nie jest wyrobem medycznym** – ma charakter **edukacyjny / dydaktyczny** i została przygotowana jako przykład:
 
-Ten dokument opisuje **każdy moduł, klasę i funkcję** w aplikacji, wraz z podstawami
-teoretycznymi użytych algorytmów. Zawiera także wskazówki dot. stosowania, złożoność
-obliczeniową, dobre praktyki i najczęstsze pułapki.
+- kompletnego projektu w Pythonie z wyraźnym podziałem na logikę i GUI,
+- użycia klasycznego modelu uczenia maszynowego (MLP – *Multi-Layer Perceptron*),
+- użycia alternatywnego, **wyjaśnialnego** systemu opartego o **logikę rozmytą** (fuzzy logic),
+- pracy na realnym, opublikowanym zbiorze danych medycznych (*Gallstone Dataset – UCI*).
 
-## Spis treści
+Główny cel programu:
 
-- 1. Architektura i moduły
-- 2. Szybki start
-- 3. Teoria i pojęcia (neurony, aktywacje, strata, SGD, ES, StepLR, CV)
-- 4. API modułów `core/*` (dataset_io, preprocess, metrics, platt, mlp, trainer, analysis, plots)
-- 5. API GUI `gui/*` (BaseTab, DataTab, TrainTab, PredictTab, PlotsTab, AnalysisTab, ModelTab, DocsTab)
-- 6. Przepływ pracy i dobre praktyki
-- 7. Testowanie, walidacja, debugowanie
-- 8. Częste problemy i rozwiązania
-- 9. Licencja i podziękowania
+> Na podstawie cech klinicznych pacjenta oszacować prawdopodobieństwo występowania kamicy pęcherzyka żółciowego oraz porównać wynik:
+> - klasycznego modelu MLP,
+> - silnika opartego o logikę rozmytą.
 
-## 1. Architektura i moduły
+Wynik ma formę:
+- **etykiety binarnej** (np. „wysokie prawdopodobieństwo kamicy” vs „niskie prawdopodobieństwo”) oraz
+- **prawdopodobieństwa numerycznego / stopnia przynależności** w przedziale \([0,1]\).
 
+---
 
-Aplikacja jest podzielona na **rdzeń (`core/`)** oraz **interfejs graficzny (`gui/`)**.
-Struktura:
+## 2. Zbiór danych: Gallstone (UCI)
 
-```
-gallstone_app/
-├─ main.py
-├─ assets/
-│  └─ docs_text.py          # (ten plik) – rozbudowana dokumentacja w Markdown
-├─ core/
-│  ├─ state.py              # pojedyncze źródło stanu aplikacji
-│  ├─ dataset_io.py         # wczytywanie CSV/XLSX (z fallback parserem XML)
-│  ├─ preprocess.py         # split stratyfikowany, z-score
-│  ├─ metrics.py            # metryki, krzywe ROC/PR, reliability, itd.
-│  ├─ platt.py              # kalibracja Platta (fit/apply)
-│  ├─ mlp.py                # MLP od zera (numpy), 1-2 warstwy ukryte
-│  ├─ trainer.py            # pętla treningowa, early stopping, step LR
-│  ├─ analysis.py           # tabela FP/FN, permutation importance
-│  └─ plots.py              # generatory wykresów (matplotlib Figure)
-└─ gui/
-   ├─ base.py               # wspólne narzędzia GUI
-   ├─ data_tab.py           # karta „Dane”
-   ├─ train_tab.py          # karta „Trening”
-   ├─ predict_tab.py        # karta „Predykcja”
-   ├─ plots_tab.py          # karta „Wykresy”
-   ├─ analysis_tab.py       # karta „Analiza”
-   ├─ model_tab.py          # karta „Model”
-   └─ docs_tab.py           # karta „Dokumentacja” (render tej treści)
-```
-## 2. Szybki start
+### 2.1. Źródło danych
 
+Dane pochodzą ze zbioru **Gallstone** opublikowanego w **UCI Machine Learning Repository** (ID: 1150). Zbiór został przygotowany na podstawie danych pacjentów z **VM Medical Park Hospital w Ankarze (Turcja)**.
 
-1. Uruchom `python main.py`.
-2. W zakładce **Dane** wczytaj plik CSV/XLSX z kolumną celu `Gallstone Status` (0/1).
-3. W **Treningu** wybierz hiperparametry → **Podziel + Z-score** → **START**.
-4. Obejrzyj logi i wykresy (**Wykresy**: Loss/ROC/PR/CM). Dostosuj próg w CM.
-5. W **Analizie** sprawdź FP/FN, *Permutation Importance*, *Reliability diagram*.
-6. W **Modelu** zapisz/wczytaj model, ucz kalibrację Platta, wykonaj batch-predykcję.
-## 3. Teoria i pojęcia
+Charakterystyka zbioru (wg opisu UCI):
 
-### Neuron (perceptron ciągły)
+- liczba pacjentów: ok. **319 osób** (część materiałów podaje 320 instancji),
+- z tego **161 osób** z rozpoznaną kamicą żółciową,
+- liczba cech (features): **~37 cech wejściowych**,
+- jedna zmienna docelowa (target): **Gallstone Status** – informacja, czy kamica jest obecna,
+- dane są **kompletne (brak braków danych)** i mają zbalansowane klasy (z grubsza tyle samo chorych i zdrowych).
 
+Zbiór obejmuje:
+- **cechy demograficzne**,
+- **cechy bioimpedancyjne** (kompozycja ciała),
+- **parametry laboratoryjne** (biochemia, funkcja wątroby, nerek, stan zapalny).
 
-**Neuron** w warstwie ukrytej/wyjściowej oblicza:  
-\\( z = x^\top w + b \\) oraz **aktywację** \\( a = \phi(z) \\).  
-Dla warstwy wyjściowej klasyfikacji binarnej stosujemy **sigmoidę**:  
-\\( \sigma(z) = \frac{1}{1+e^{-z}} \\) → wynik interpretujemy jako \\( P(y=1\mid x) \\).
+W projekcie dane te znajdują się w pliku:
 
-**ReLU** (Rectified Linear Unit): \\( \text{ReLU}(z) = \max(0,z) \\) – szybka, niweluje problem zanikania gradientu dla dodatnich aktywacji.  
-**Tanh**: \\( \tanh(z) = \frac{e^z-e^{-z}}{e^z+e^{-z}} \\), wartości w \\([-1,1]\\).
+- `dataset-uci.xlsx` – lokalna kopia zestawu Gallstone (UCI) w formacie Excela.
 
-**Wagi** inicjalizujemy metodami *He* (dla ReLU) lub *Xavier/Glorot* (dla tanh/sigmoid), by utrzymać wariancję sygnału w głąb sieci.
+### 2.2. Zmienna docelowa (target)
 
-### Binary Cross-Entropy (BCE)
+Zmienną wyjściową (klasą) jest:
 
+- **Gallstone Status** – zmienna binarna:
+  - `0` – *kamica obecna (pacjent z kamicą)*,
+  - `1` – *kamica nieobecna (osoba zdrowa / kontrolna)*.
 
-Strata używana do uczenia klasyfikatora binarnego:
-\\[
-  \mathcal{L}_\\text{BCE}(y, \hat{p}) = -\frac{1}{N}\sum_{i=1}^{N}\left[y_i\log(\hat{p}_i) + (1-y_i)\log(1-\hat{p}_i)\right].
-\\]
-Zapewnia silny gradient dla przewidywań bliskich 0/1 i dobrze współgra z wyjściową sigmoidalną.
+W modelu MLP i w systemie fuzzy jest to wartość, którą próbujemy przewidzieć.
 
-### SGD (mini-batch), Backprop i L2
+### 2.3. Główne grupy cech wejściowych
 
+Poniżej zebrano najważniejsze grupy cech występujących w zbiorze Gallstone (UCI). Nazwy w nawiasach odpowiadają oryginalnym kolumnom.
 
-**Backpropagacja** wyprowadza gradienty po wagach poprzez regułę łańcuchową.  
-**Mini-batch SGD**: dzielimy dane na paczki, aktualizujemy parametry po każdej paczce.  
-**L2 (weight decay)** dodaje do gradientu składnik \\( \lambda W \\), zapobiega nadmiernym wartościom wag.
+#### 2.3.1. Cechy demograficzne
 
-### Early stopping
+- **Wiek (Age)** – wiek pacjenta w latach.
+- **Płeć (Gender)** – płeć (zakodowana binarnie, np. 0 – mężczyzna, 1 – kobieta).
+- **Wzrost (Height)** – wzrost w centymetrach.
+- **Masa ciała (Weight)** – masa ciała w kilogramach.
+- **BMI (Body Mass Index)** – wskaźnik masy ciała:
 
+  \[
+  \text{BMI} = \frac{\text{masa [kg]}}{\text{wzrost [m]}^2}
+  \]
 
-Zatrzymuje trening, gdy metryka walidacyjna (np. `val_loss`) nie poprawia się przez `patience` epok. Po zakończeniu przywracane są **najlepsze wagi** (najniższy `val_loss`).
+#### 2.3.2. Choroby współistniejące
 
-### Harmonogram uczenia (Step LR decay)
+- **Comorbidity** – liczba / skala chorób współistniejących (0 – brak, 1 – jedna, 2 – dwie, 3 – ≥3).
+- **Coronary Artery Disease (CAD)** – choroba wieńcowa (0 – nie, 1 – tak).
+- **Hypothyroidism** – niedoczynność tarczycy (0 – nie, 1 – tak).
+- **Hyperlipidemia** – hipercholesterolemia / nieprawidłowy profil lipidowy (0 – nie, 1 – tak).
+- **Diabetes Mellitus (DM)** – cukrzyca (0 – nie, 1 – tak).
 
+#### 2.3.3. Parametry bioimpedancji i składu ciała
 
-Co `step_every` epok modyfikujemy LR: \\( \text{lr} \leftarrow \gamma\cdot\text{lr} \\) (np. \\( \gamma=0.5 \\)). W praktyce stabilizuje trening i pozwala schodzić do minimum.
+- **Total Body Water (TBW)** – całkowita woda w organizmie.
+- **Extracellular Water (ECW)** – woda pozakomórkowa.
+- **Intracellular Water (ICW)** – woda wewnątrzkomórkowa.
+- **ECF/TBW** – udział wody pozakomórkowej w całkowitej wodzie.
+- **Total Body Fat Ratio (TBFR)** – procent tkanki tłuszczowej w organizmie.
+- **Lean Mass (LM)** – masa beztłuszczowa.
+- **Protein** – szacunkowa ilość białka w organizmie.
+- **Visceral Fat Rating (VFR)** – skala otłuszczenia trzewnego.
+- **Bone Mass (BM)** – masa kostna.
+- **Muscle Mass (MM)** – masa mięśniowa.
+- **Obesity** – wskaźnik otyłości (procent nadmiernej tkanki tłuszczowej).
+- **Total Fat Content (TFC)** – całkowita ilość tłuszczu.
+- **Visceral Fat Area (VFA)** – powierzchnia trzewnej tkanki tłuszczowej.
+- **Visceral Muscle Area (VMA)** – powierzchnia mięśni w obrębie trzewi.
+- **Hepatic Fat Accumulation (HFA)** – stłuszczenie wątroby (kategorycznie, np. 0–4).
 
-### Stratyfikowany podział i K-fold CV
+#### 2.3.4. Parametry laboratoryjne
 
+- **Glucose** – glikemia (stężenie glukozy).
+- **Total Cholesterol (TC)** – cholesterol całkowity.
+- **LDL (Low Density Lipoprotein)** – „zły” cholesterol.
+- **HDL (High Density Lipoprotein)** – „dobry” cholesterol.
+- **Triglyceride** – triglicerydy.
+- **AST (Aspartate Aminotransferase)** – enzym wątrobowy.
+- **ALT (Alanine Aminotransferase)** – enzym wątrobowy.
+- **ALP (Alkaline Phosphatase)** – enzym wątrobowo‑kostny.
+- **Creatinine** – parametr czynności nerek.
+- **GFR (Glomerular Filtration Rate)** – wskaźnik filtracji kłębuszkowej.
+- **CRP (C-Reactive Protein)** – białko ostrej fazy (stan zapalny).
+- **HGB (Hemoglobin)** – hemoglobina (transport tlenu we krwi).
+- **Vitamin D** – stężenie witaminy D.
 
-**Stratyfikacja** zachowuje proporcje klas w train/test.  
-**K-fold CV (stratyfikowany)** dzieli dane na K częsci, trenuje K modeli (zostawiając jeden fold jako walidację), uśrednia metryki. Pomaga ocenić stabilność i wariancję wyniku.
+### 2.4. Przygotowanie danych w projekcie
 
-### ROC/AUC oraz PR/AUPRC
+Logika projektu zakłada typowy pipeline:
 
+1. **Wczytanie danych** z pliku `dataset-uci.xlsx` (np. biblioteka `pandas`).
+2. **Oddzielenie cech wejściowych X i celu y**:
+   - \(X \in \mathbb{R}^{n \times d}\) – macierz cech (n – liczba pacjentów, d – liczba cech),
+   - \(y \in \{0,1\}^n\) – etykiety Gallstone Status.
+3. **Podział na zbiór treningowy i testowy**, np. 70% / 30% lub 80% / 20%.
+4. **Standaryzacja / skalowanie cech ciągłych**, np.:
 
-**ROC**: krzywa TPR vs FPR przy zmianie progu. **AUC** to pole pod ROC (integracja trapezami).  
-**PR**: Precision vs Recall. **AUPRC** często lepsze przy klasie rzadkiej.  
-W implementacji: generujemy wektor progów \\([0,1]\\), wyliczamy punkty, sortujemy i całkujemy numerycznie.
+   \[
+   x' = \frac{x - \mu}{\sigma}
+   \]
 
-### Kalibracja prawdopodobieństw i Platt scaling
+   gdzie:
+   - \(\mu\) – średnia z danej cechy w zbiorze treningowym,
+   - \(\sigma\) – odchylenie standardowe.
 
+5. Ewentualne **kodowanie cech kategorycznych** (jeśli jeszcze nie są zakodowane) – w dataset‑cie Gallstone większość jest już gotowa (0,1,2,…).
 
-**Reliability diagram** porównuje przewidziane prawdopodobieństwa do częstości empirycznych w kubełkach.  
-**Platt scaling** uczy funkcję \\( \sigma(a s + b) \\) mapującą skory \\( s \\) na lepiej skalibrowane prawdopodobieństwa. Tu realizacja bez scikit-learn (optymalizacja 2D Newtonem).
+---
 
-## 4. API rdzenia (`core/*`)
+## 3. Model MLP (Multi-Layer Perceptron)
 
-### 4.1. `core/dataset_io.py`
+### 3.1. Idea MLP
 
+Perceptron wielowarstwowy (MLP) to klasyczna sieć neuronowa:
 
-**Funkcje:**
+- przyjmuje wektor cech wejściowych \(x \in \mathbb{R}^d\),
+- przeprowadza go przez jedną lub więcej **warstw ukrytych**,
+- na wyjściu zwraca prawdopodobieństwo przynależności do klasy „kamica obecna”.
 
-- `read_dataset(path: str) -> pd.DataFrame`  
-  Wczytuje CSV lub XLSX. Próbuje `openpyxl`, a w razie niepowodzenia używa fallback-parsingu XML/ZIP.
+W projekcie wykorzystano styl pracy znany z biblioteki **scikit-learn** (klasa `MLPClassifier` lub podobna), co umożliwia:
 
-- `_custom_xlsx_to_df(xlsx_path: str) -> pd.DataFrame`  
-  Parser awaryjny: rozpakowuje `.xlsx`, czyta `sharedStrings.xml` i pierwszy arkusz `xl/worksheets/*.xml`,
-  samodzielnie rekonstruuje tabelę (wraz z nagłówkiem).
+- prostą konfigurację liczby warstw i neuronów,
+- wybór funkcji aktywacji,
+- automatyczną optymalizację wag.
 
-- `select_numeric_features(df: pd.DataFrame, target_col: str) -> list[str]`  
-  Zwraca listę **numerycznych** kolumn cech (z wykluczeniem kolumny celu).
-```python
+### 3.2. Struktura sieci
 
-from core.dataset_io import read_dataset, select_numeric_features
-df = read_dataset("data.xlsx")
-feats = select_numeric_features(df, target_col="Gallstone Status")
+Dla przypadku zbioru Gallstone:
 
-```
+- liczba wejść: \(d\) – liczba cech (ok. 37),
+- wyjście: jedna neuron‑jednostka z aktywacją sigmoidalną lub softmax dla klasy binarnej.
 
-### 4.2. `core/preprocess.py`
+Abstrakcyjnie:
 
+- **warstwa wejściowa**: \(a^{(0)} = x\),
+- **warstwy ukryte**: dla każdej warstwy \(l = 1, 2, \dots, L - 1\):
 
-**Funkcje:**
+  \[
+  z^{(l)} = W^{(l)} a^{(l-1)} + b^{(l)}, \quad
+  a^{(l)} = f^{(l)}(z^{(l)})
+  \]
 
-- `stratified_split(X, y, train_frac=0.7, seed=42)` → `(train_idx, test_idx)`  
-  Dzieli wskaźniki próbek tak, by zachować proporcje klas 0/1.
+  gdzie:
+  - \(W^{(l)}\) – macierz wag,
+  - \(b^{(l)}\) – wektor biasów,
+  - \(f^{(l)}\) – nieliniowa funkcja aktywacji (np. ReLU, tanh).
 
-- `zscore_fit(X)` → `(mu, sigma)`  
-  Oblicza statystyki standaryzacji **tylko na train**.
+- **warstwa wyjściowa**:
 
-- `zscore_transform(X, mu, sigma)` → `X'`  
-  Zwraca znormalizowaną macierz cech. Zabezpiecza \( \sigma=0 \) → 1.0.
-### 4.3. `core/metrics.py`
+  \[
+  z^{(L)} = W^{(L)} a^{(L-1)} + b^{(L)}, \quad
+  \hat{y} = \sigma(z^{(L)})
+  \]
 
+  gdzie \(\sigma\) to funkcja sigmoidalna:
 
-**Funkcje i metryki:**
+  \[
+  \sigma(z) = \frac{1}{1 + e^{-z}}
+  \]
 
-- `safe_trapezoid(y, x)` – alias do `np.trapezoid` lub `np.trapz` (kompatybilność).
-- `sigmoid(z)` – funkcja \( \sigma(z) = 1/(1+e^{-z}) \).
-- `bce_loss(y_true, y_prob)` – Binary Cross-Entropy ze stabilnym `clip`.
-- `accuracy(y_true, y_pred)` – odsetek trafień.
-- `confusion(y_true, y_pred)` – zwraca *(tp, fp, fn, tn, tpr, fpr, prec, rec)*.
-- `roc_curve_vals(y_true, y_score, num=200)` – generuje krzywą ROC.
-- `pr_curve_vals(y_true, y_score, num=200)` – generuje krzywą PR.
-- `binned_reliability(y_true, y_prob, bins=10)` – punkty do reliability diagram.
-### 4.4. `core/platt.py`
+Wynik \(\hat{y} \in (0,1)\) interpretuje się jako **oszacowane prawdopodobieństwo występowania kamicy**.
 
+### 3.3. Funkcja straty – log-loss (binary cross-entropy)
 
-**Kalibracja (Platt):**
+Dla pojedynczego przykładu \((x_i, y_i)\), gdzie \(y_i \in \{0,1\}\) i \(\hat{y}_i\) to wyjście sieci, funkcja straty ma postać:
 
-- `fit_platt(y_true, y_score, max_iter=100, tol=1e-6)` → `(a, b)`  
-  Uczy parametry \\(a,b\\) w regresji logistycznej \\( \sigma(a s + b) \\) metodą Newtona (zamknięty przypadek 2×2).
+\[
+\mathcal{L}_i = -\left[ y_i \log(\hat{y}_i) + (1 - y_i)\log(1 - \hat{y}_i) \right]
+\]
 
-- `apply_platt(y_score, a, b)` → `p_calibrated`  
-  Zwraca \\( \sigma(a s + b) \\).
+Dla całego zbioru uczącego (N przykładów):
 
-**Złożoność:** liniowa w liczbie próbek; koszty per iteracja stałe (mała macierz 2×2).
-### 4.5. `core/mlp.py` — MLPModel
+\[
+\mathcal{L} = \frac{1}{N} \sum_{i=1}^{N} \mathcal{L}_i
+\]
 
+Minimalizacja tej funkcji powoduje, że sieć uczy się przypisywać wysokie prawdopodobieństwa poprawnej klasie.
 
-**Klasa:** `MLPModel` (numpy-only, 1–2 warstwy ukryte)
+### 3.4. Uczenie sieci – propagacja wsteczna
 
-**Inicjalizacja:**
-- `n_in` – liczba cech wejściowych,
-- `n_hidden=(h1,h2)` – rozmiary warstw (gdy `h2=0` → 1 warstwa),
-- `lr, epochs, batch_size, activation ∈ {relu,tanh}, l2, seed`.
+Optymalizacja wag odbywa się za pomocą wariantu **spadku gradientowego**, często z momentem lub innymi ulepszeniami (np. Adam). Podstawowa idea:
 
-**Metody:**
-- `forward(X)` → `(y, cache)`  
-  Przepływ w przód; `y = sigmoid(z_out)`. `cache` niesie aktywacje do backprop.
+1. **Propagacja w przód** – obliczamy \(\hat{y}_i\) dla danego przykładu.
+2. **Obliczenie błędu** – liczymy \(\mathcal{L}_i\).
+3. **Propagacja wsteczna (backpropagation)** – liczymy pochodne \(\frac{\partial \mathcal{L}}{\partial W^{(l)}}\), \(\frac{\partial \mathcal{L}}{\partial b^{(l)}}\).
+4. **Aktualizacja wag**:
 
-- `backward(cache, y_true)` → `None`  
-  Ręczny backprop z L2 dla wag; aktualizuje parametry SGD.
+   \[
+   W^{(l)} \leftarrow W^{(l)} - \eta \frac{\partial \mathcal{L}}{\partial W^{(l)}}, \quad
+   b^{(l)} \leftarrow b^{(l)} - \eta \frac{\partial \mathcal{L}}{\partial b^{(l)}}
+   \]
 
-- `one_epoch(X, y)` → `None`  
-  Losuje mini-batche, powtarza `forward+backward`.
+   gdzie \(\eta\) to współczynnik uczenia (learning rate).
 
-- `predict_proba(X)` → `p ∈ (0,1)`  
-  Zwraca prawdopodobieństwa klasy 1.
+W praktycznej implementacji w scikit‑learn szczegóły backpropagacji i optymalizacji są ukryte za interfejsem `fit()`.
 
-- `predict(X, threshold=0.5)` → etykiety {0,1}
-### 4.6. `core/trainer.py` — Trainer
+### 3.5. Metryki oceny jakości modelu
 
+Po wytrenowaniu modelu MLP oceniamy go na zbiorze testowym. Dla klasyfikacji binarnej zwykle liczy się:
 
-**Klasa:** `Trainer` — kapsułkuje pętlę treningową wraz z:
-- early stopping (`use_es`, `patience`),
-- step LR decay (`use_step_lr`, `step_every`, `gamma`),
-- callbackami `on_epoch(ep, loss, val_loss, lr)` i `on_done(history)`,
-- wsparciem dla flagi `stop_flag` (przerywanie treningu z GUI).
+- **macierz pomyłek** (confusion matrix):
 
-**Metoda:** `run()` – wykonuje pełny trening, zarządza najlepszymi wagami.
-### 4.7. `core/analysis.py`
+  - TP – *True Positives* (poprawnie zaklasyfikowani pacjenci z kamicą),
+  - TN – *True Negatives* (poprawnie zaklasyfikowani zdrowi),
+  - FP – *False Positives* (fałszywie „chory”),
+  - FN – *False Negatives* (fałszywie „zdrowy”).
 
+Na tej podstawie obliczamy:
 
-**Funkcje:**
+- **Accuracy (dokładność)**:
 
-- `make_test_table(Xte, yte, p_te, mu, sigma, features, test_idx=None)`  
-  Buduje tabelę testową z oryginalną skalą cech, `y_true`, `p`, `y_pred`, `row_id`, `error_type` (FP/FN/OK).
+  \[
+  \text{Accuracy} = \frac{TP + TN}{TP + TN + FP + FN}
+  \]
 
-- `permutation_importance(model, Xte, yte, features, base_probs=None, seed=123)`  
-  Dla każdej cechy permutuje jej kolumnę i liczy spadek AUC: **ΔAUC = AUC_base − AUC_perm**.
-### 4.8. `core/plots.py`
+- **Precision (precyzja)** – wśród przewidzianych „chorych” ilu jest faktycznie chorych:
 
+  \[
+  \text{Precision} = \frac{TP}{TP + FP}
+  \]
 
-**Funkcje wykresów (zwracają `matplotlib.figure.Figure`):**
-- `plot_loss(history)`,
-- `plot_roc(y_true, p)`,
-- `plot_pr(y_true, p)`,
-- `plot_cm_metrics(y_true, p, thr)` – macierz pomyłek + słupki metryk.
-## 5. API interfejsu (`gui/*`)
+- **Recall (czułość, TPR)** – jaki odsetek realnie chorych wykrył model:
 
+  \[
+  \text{Recall} = \frac{TP}{TP + FN}
+  \]
 
-GUI jest oparte o **Tkinter/ttk**. Każda zakładka jest klasą dziedziczącą z `BaseTab`.
-`BaseTab.draw_figure(...)` osadza wykres (matplotlib) z paskiem narzędzi.
-### gui/base.py
+- **F1-score** – średnia harmoniczna precyzji i czułości:
 
-**Metody/akcje:**
+  \[
+  F1 = 2 \cdot \frac{\text{Precision} \cdot \text{Recall}}{\text{Precision} + \text{Recall}}
+  \]
 
-- `BaseTab.info()`
-- `BaseTab.warn()`
-- `BaseTab.error()`
-- `BaseTab.draw_figure()`
+Dodatkowo można analizować krzywą ROC oraz AUC.
 
-### gui/data_tab.py
+---
 
-**Metody/akcje:**
+## 4. Silnik oparty o logikę rozmytą (fuzzy logic)
 
-- `DataTab.build()`
-- `DataTab._browse()`
-- `DataTab._load()`
-- `DataTab._build_preview_table()`
-- `DataTab._render_preview()`
+### 4.1. Dlaczego logika rozmyta?
 
-### gui/train_tab.py
+Modele oparte na logice rozmytej są:
 
-**Metody/akcje:**
+- bardziej **interpretowalne** – można zapisać reguły w stylu „IF… THEN…”,
+- zbliżone do sposobu, w jaki **lekarz** rozumuje („pacjent starszy, z otyłością i wysokim cholesterolem → wysokie ryzyko kamicy”),
+- odporne na pewną niepewność i nieostrość granic (np. „wysokie BMI”, „średni poziom cholesterolu”).
 
-- `TrainTab.build()`
-- `TrainTab._prep()`
-- `TrainTab._start()`
-- `TrainTab._start_cv()`
-- `TrainTab._stop()`
-- `TrainTab._evaluate()`
+W projekcie silnik fuzzy stanowi **alternatywę** wobec MLP i umożliwia porównanie:
 
-### gui/predict_tab.py
+- „czarnej skrzynki” (MLP),
+- „białej skrzynki” (zestaw reguł rozmytych).
 
-**Metody/akcje:**
+### 4.2. Zmienne lingwistyczne
 
-- `PredictTab.build()`
-- `PredictTab._build_fields()`
-- `PredictTab._predict()`
+Dla wybranych cech ze zbioru Gallstone definiujemy **zmienne lingwistyczne**, np.:
 
-### gui/plots_tab.py
+- WIEK – {młody, średni, starszy},
+- BMI – {prawidłowe, nadwaga, otyłość},
+- HFA (stłuszczenie wątroby) – {brak, łagodne, umiarkowane, ciężkie},
+- TC (cholesterol całkowity) – {niski, prawidłowy, wysoki},
+- GFR – {prawidłowa czynność nerek, obniżona},
+- VFR – {niski tłuszcz trzewny, umiarkowany, wysoki},
+- itp.
 
-**Metody/akcje:**
+Każda z tych wartości lingwistycznych odpowiada **zbiorowi rozmytemu** opisującemu pewien przedział liczbowy.
 
-- `PlotsTab.build()`
-- `PlotsTab._loss()`
-- `PlotsTab._roc()`
-- `PlotsTab._pr()`
-- `PlotsTab._cm()`
+### 4.3. Funkcje przynależności
 
-### gui/analysis_tab.py
+Zbiory rozmyte opisujemy funkcjami przynależności \(\mu_A(x) \in [0,1]\). Przykładowo, dla trójkątnej funkcji przynależności:
 
-**Metody/akcje:**
+- parametry: \(a < b < c\),
+- \(a\) – punkt, w którym zaczyna się rosnąca część,
+- \(b\) – środek (wartość 1),
+- \(c\) – punkt, w którym funkcja opada do 0.
 
-- `AnalysisTab.build()`
-- `AnalysisTab._render_errors()`
-- `AnalysisTab._importance()`
-- `AnalysisTab._reliability()`
+Definicja:
 
-### gui/model_tab.py
+\[
+\mu_A(x) =
+\begin{cases}
+0, x \le a \\
+\dfrac{x - a}{b - a}, a < x \le b \\
+\dfrac{c - x}{c - b}, b < x < c \\
+0, x \ge c
+\end{cases}
+\]
 
-**Metody/akcje:**
 
-- `ModelTab.build()`
-- `ModelTab._set_cal()`
-- `ModelTab._save()`
-- `ModelTab._load()`
-- `ModelTab._learn_cal()`
-- `ModelTab._batch()`
+Analogicznie można stosować funkcje trapezowe, gaussowskie itd. W projekcie stosuje się proste **funkcje trójkątne / trapezowe**, które łatwo dobrać i interpretować.
 
-### gui/docs_tab.py
+### 4.4. Reguły rozmyte (Mamdani‑style)
 
-**Metody/akcje:**
+Reguły w systemie są zapisane w postaci:
 
-- `DocsTab.build()`
-- `DocsTab._search()`
-- `DocsTab._copy_all()`
-- `DocsTab._save_file()`
+> \(R_j\): JEŻELI (WIEK jest *starszy*) ORAZ (BMI jest *otyłość*) ORAZ (HFA jest *umiarkowane lub ciężkie*)  
+> TO (RYZYKO\_KAMICY jest *wysokie*).
 
-## 6. Przepływ pracy i najlepsze praktyki
+Formalnie, dla danej reguły \(R_j\):
 
+\[
+R_j: \text{JEŻELI } A_{1}^{(j)} \wedge A_{2}^{(j)} \wedge \dots \wedge A_{k}^{(j)} \text{ TO } B^{(j)}
+\]
 
-1. **Przygotowanie danych**: upewnij się, że kolumna celu to 0/1, brakujące wartości są oczyszczone.
-2. **Split & Z-score**: licz statystyki tylko na train, *nigdy* na całości.
-3. **Hiperparametry**: zacznij od mniejszych LR (np. 1e-3), włącz ES, ewentualnie StepLR.
-4. **Ocena**: oprócz accuracy patrz na ROC/AUC, PR/AUPRC; dopasuj **próg** do kosztów FP/FN.
-5. **Kalibracja**: używaj **Platta** tylko na zbiorze walidacyjnym (w narzędziu – na teście dla prostoty).
-6. **Eksport**: zapisuj model (wagi + μ,σ + lista cech + kalibracja).
-7. **Batch predykcja**: dopilnuj tej samej kolejności i nazewnictwa kolumn cech.
-## 7. Testowanie, walidacja, debugowanie
+gdzie:
+- \(A_{i}^{(j)}\) – przesłanki (zbiory rozmyte na wejściu),
+- \(B^{(j)}\) – konkluzja (zbiór rozmyty na wyjściu, np. „niskie”, „średnie”, „wysokie ryzyko”).
 
+### 4.5. Wnioskowanie rozmyte
 
-- **Jednostkowo**: sprawdź `zscore_fit/transform`, `roc_curve_vals`, `bce_loss` na prostych przypadkach.
-- **Numerycznie**: porównaj gradienty z estymacją numeryczną na małej sieci (finite differences).
-- **Losowość**: ustaw `seed` dla powtarzalności.
-- **Wydajność**: zwiększ `batch_size`, zmniejsz `epochs` podczas prototypowania.
-## 8. Częste problemy i rozwiązania
+Dla zadanego pacjenta:
 
+1. **Fuzzification** – zamiana wartości liczbowych na stopnie przynależności do zbiorów rozmytych.
+2. **Obliczenie stopnia spełnienia reguł** – typowo:
 
-- **`ValueError: Brak kolumny celu`** – sprawdź nazwę `Gallstone Status`.
-- **`NaN` w cechach** – wyczyść dane przed wczytaniem (lub imputuj).
-- **Zerowa wariancja cechy** – w `zscore_fit` sigma==0 → 1.0 (bezpiecznie).
-- **Overfitting** – zwiększ L2, włącz ES, użyj StepLR, zbieraj więcej danych.
-- **Niestabilny trening** – zmniejsz LR, zwłaszcza dla ReLU; rozważ tanh.
-## 9. Licencja i podziękowania
+   - dla operatora AND stosuje się:
 
+     \[
+     \mu_{A \wedge B}(x) = \min\left(\mu_A(x), \mu_B(x)\right)
+     \]
 
-Kod bazuje na bibliotekach **numpy**, **pandas**, **matplotlib**, **Tkinter/ttk**.  
-Możesz używać i modyfikować według własnych potrzeb w ramach swojego projektu.
-### API: `core.dataset_io.read_dataset`
+   - dla operatora OR:
 
-**Rodzaj:** function
+     \[
+     \mu_{A \vee B}(x) = \max\left(\mu_A(x), \mu_B(x)\right)
+     \]
 
-**Sygnatura:** `read_dataset(path: str) -> pd.DataFrame`
+3. **Agregacja wniosków** – łączymy wyniki wszystkich reguł w jeden zbiór rozmyty reprezentujący zmienną wyjściową (np. *RYZYKO\_KAMICY*).
+4. **Defuzyfikacja** – przekształcamy zbiór rozmyty na wartość liczbową, np. metoda środka ciężkości (center of gravity):
 
-**Opis:** Wczytuje dane z CSV/XLSX. Preferuje openpyxl, fallback na parser XML (.xlsx jako zip).
+   \[
+   y^\* = \frac{\int y \, \mu_R(y) \, dy}{\int \mu_R(y) \, dy}
+   \]
 
-#### Parametry i zwracane wartości
+   gdzie \(\mu_R(y)\) to wynikowa funkcja przynależności dla zmiennej wyjściowej (np. ryzyko).
 
-- Patrz sygnatura oraz opisy powyżej.
+Wynik \(y^\*\) jest następnie skalowany do przedziału \([0,1]\) lub do skali procentowej, a także może być przemapowany na etykietę:
 
-#### Złożoność obliczeniowa
+- \(y^\* < 0.33\) → niskie ryzyko,
+- \(0.33 \le y^\* < 0.66\) → średnie ryzyko,
+- \(y^\* \ge 0.66\) → wysokie ryzyko.
 
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
+(Granice progów można modyfikować w kodzie w zależności od założeń.)
 
-#### Przykład użycia
+### 4.6. Eksport wyników do CSV
 
-```python
-from core.dataset_io import read_dataset
-# ... uzupełnij własnymi danymi ...
-```
+Silnik fuzzy w projekcie dodatkowo umożliwia **eksport wyników** np. do pliku CSV:
 
-#### Błędy i pułapki
+- dla każdego pacjenta zapisywane są:
+  - identyfikator / indeks,
+  - wartość wyjściowa fuzzy (np. ryzyko w [0,1]),
+  - zaklasyfikowana klasa (np. 0/1 lub niskie/średnie/wysokie).
 
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
+Przykładowy plik wynikowy: `gallstone_fuzzy_predictions.csv`.
 
-### API: `core.dataset_io._custom_xlsx_to_df`
+---
 
-**Rodzaj:** function
+## 5. Architektura projektu
 
-**Sygnatura:** `_custom_xlsx_to_df(xlsx_path: str) -> pd.DataFrame`
+Struktura katalogów (zgodnie z opisem w README):
 
-**Opis:** Awaryjny parser arkusza XLSX: sharedStrings + pierwszy worksheet, rozpoznawanie typów.
+- `main.py` – **główny plik uruchomieniowy**:
+  - inicjalizuje logikę,
+  - ładuje / trenuje modele,
+  - uruchamia warstwę GUI.
+- `core/` – **warstwa logiki biznesowej i uczenia maszynowego**:
+  - wczytywanie danych,
+  - przygotowanie cech,
+  - trenowanie i zapis modelu MLP,
+  - implementacja silnika fuzzy,
+  - obliczanie metryk i ewaluacja.
+- `gui/` – **warstwa interfejsu użytkownika**:
+  - formularze do wprowadzania cech pacjenta,
+  - przyciski wywołujące predykcję MLP i fuzzy,
+  - wyświetlanie wyników,
+  - ewentualne opcje eksportu / ustawień.
+- `assets/` – zasoby graficzne na potrzeby GUI (ikony, logotypy itp.).
+- dane:
+  - `dataset-uci.xlsx` – wejściowy zbiór danych (Gallstone – UCI),
+  - `gallstone_fuzzy_predictions.csv` – przykładowy plik wyników fuzzy.
 
-#### Parametry i zwracane wartości
+Logika aplikacji jest rozdzielona tak, aby:
 
-- Patrz sygnatura oraz opisy powyżej.
+- łatwo było podmienić model MLP (np. na inny klasyfikator),
+- można było rozbudowywać zestaw reguł fuzzy bez ingerencji w GUI,
+- GUI pozostawało cienką warstwą prezentacji.
 
-#### Złożoność obliczeniowa
+---
 
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
+## 6. Przepływ działania programu
 
-#### Przykład użycia
+Ogólny scenariusz:
 
-```python
-from core.dataset_io import _custom_xlsx_to_df
-# ... uzupełnij własnymi danymi ...
-```
+1. **Start programu**:
+   - użytkownik uruchamia `python main.py`,
+   - inicjalizowane jest środowisko (wczytanie modeli / ewentualny trening).
 
-#### Błędy i pułapki
+2. **Wczytanie / trenowanie modelu MLP**:
+   - jeśli istnieje zapisany model (np. w pliku), aplikacja może go wczytać,
+   - w przeciwnym razie:
+     - wczytywany jest `dataset-uci.xlsx`,
+     - dane są dzielone na zbiór treningowy i testowy,
+     - trenowany jest `MLPClassifier`,
+     - wynikowy model może być zapisywany na dysku.
 
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
+3. **Przygotowanie silnika fuzzy**:
+   - definiowane są zmienne lingwistyczne,
+   - przypisywane funkcje przynależności (parametry „a, b, c” dla funkcji trójkątnych itp.),
+   - ładowany jest zbiór reguł (`if–then`).
 
-### API: `core.dataset_io.select_numeric_features`
+4. **Uruchomienie GUI**:
+   - użytkownik wybiera tryb pracy:
+     - pojedynczy pacjent – ręczne wprowadzenie danych,
+     - ewaluacja na całym zbiorze (np. do porównania metryk),
+   - po wciśnięciu przycisku **„Oblicz”** aplikacja:
+     - przekształca dane wejściowe do odpowiedniego formatu,
+     - przekazuje je do MLP i/lub silnika fuzzy,
+     - wyświetla wynik (predykcja MLP i wynik fuzzy).
 
-**Rodzaj:** function
+5. **Wyświetlanie i zapis rezultatów**:
+   - w GUI pokazuje się:
+     - przewidywana klasa (0/1),
+     - prawdopodobieństwo z MLP,
+     - wynik fuzzy (np. wartość z przedziału [0,1] i opis słowny),
+   - opcjonalnie użytkownik może:
+     - zapisać wyniki do pliku CSV,
+     - porównać metryki modeli.
 
-**Sygnatura:** `select_numeric_features(df: pd.DataFrame, target_col: str) -> list[str]`
+---
 
-**Opis:** Zwraca numeryczne kolumny cech z wykluczeniem kolumny celu.
+## 7. Opis interfejsu użytkownika (GUI)
 
-#### Parametry i zwracane wartości
+Szczegółowa implementacja GUI zależy od użytej biblioteki (Tkinter / PyQt / inna). Niezależnie od narzędzia, logika jest podobna.
 
-- Patrz sygnatura oraz opisy powyżej.
+Typowe elementy interfejsu:
 
-#### Złożoność obliczeniowa
+1. **Formularz danych pacjenta**:
+   - pola tekstowe / numeryczne dla:
+     - wieku, wzrostu, masy ciała, BMI,
+     - chorób współistniejących (CAD, DM, itd.),
+     - parametrów bioimpedancji,
+     - parametrów laboratoryjnych (glukoza, cholesterol, enzymy wątrobowe, GFR, CRP, HGB, Vit. D),
+   - listy rozwijane dla cech kategorycznych (np. HFA 0–4).
 
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
+2. **Wybór modelu**:
+   - przełącznik / checkbox:
+     - [ ] użyj modelu MLP,
+     - [ ] użyj silnika fuzzy,
+     - [ ] użyj obu i porównaj wyniki.
 
-#### Przykład użycia
+3. **Przycisk obliczenia**:
+   - przycisk „**Oblicz predykcję**” / „**Analizuj**”,
+   - po kliknięciu:
+     - dane są walidowane,
+     - aplikacja wywołuje odpowiednie metody w warstwie `core`.
 
-```python
-from core.dataset_io import select_numeric_features
-# ... uzupełnij własnymi danymi ...
-```
+4. **Panel wyników**:
+   - tekstowy opis predykcji MLP:
+     - np. „Prawdopodobieństwo kamicy wg MLP: 0.78 (78%) – klasa: kamica obecna”.
+   - opis wyniku fuzzy:
+     - np. „Silnik fuzzy: ryzyko 0.65 (wysokie) – klasa: kamica obecna”.
+   - ewentualne dodatkowe informacje:
+     - interpretacja (np. „podwyższone BMI, istotne stłuszczenie wątroby i nieprawidłowy profil lipidowy”).
 
-#### Błędy i pułapki
+5. **Przyciski dodatkowe**:
+   - np. „Zapisz wyniki do CSV”,
+   - „Pokaż dokumentację” – może otwierać tekst z `docs_text.py` w osobnym oknie.
 
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
+---
 
-### API: `core.preprocess.stratified_split`
+## 8. Uruchamianie i środowisko
 
-**Rodzaj:** function
+Przykładowa procedura (zgodna z README):
 
-**Sygnatura:** `stratified_split(X, y, train_frac=0.7, seed=42) -> (np.ndarray, np.ndarray)`
+1. Klonowanie repozytorium:
 
-**Opis:** Dzieli indeksy na train/test zachowując proporcje klas.
+   ```bash
+   git clone https://github.com/patryk-pszeniczny/gallstone-ai-lab.git
+   cd gallstone-ai-lab
+   ```
 
-#### Parametry i zwracane wartości
+2. Utworzenie i aktywacja wirtualnego środowiska (Python 3.x):
 
-- Patrz sygnatura oraz opisy powyżej.
+   ```bash
+   python -m venv venv
+   # Windows:
+   venv\Scripts\activate
+   # Linux / macOS:
+   source venv/bin/activate
+   ```
 
-#### Złożoność obliczeniowa
+3. Instalacja zależności:
 
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-#### Przykład użycia
+4. Uruchomienie aplikacji:
 
-```python
-from core.preprocess import stratified_split
-# ... uzupełnij własnymi danymi ...
-```
+   ```bash
+   python main.py
+   ```
 
-#### Błędy i pułapki
+Po uruchomieniu aplikacja wczyta dane, przygotuje modele i otworzy GUI.
 
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
+---
 
-### API: `core.preprocess.zscore_fit`
+## 9. Ograniczenia projektu
 
-**Rodzaj:** function
+1. **Nie jest to wyrób medyczny** – model ma charakter demonstracyjny.
+2. **Rozmiar zbioru danych** – 319 osób to relatywnie mały zbiór jak na modele ML, co może:
+   - sprzyjać przeuczeniu,
+   - ograniczać uogólnialność wyników.
+3. **Źródło danych z jednego ośrodka** – pacjenci pochodzą z jednego szpitala (Turcja), więc:
+   - rozkład cech populacji może różnić się od innych krajów / grup etnicznych.
+4. **Brak pełnej walidacji klinicznej** – projekt nie zastępuje badań klinicznych ani wytycznych towarzystw naukowych.
+5. **Dobór reguł fuzzy** – reguły zostały zdefiniowane „ekspercko” lub pół‑heurystycznie, a nie na podstawie formalnych badań klinicznych.
 
-**Sygnatura:** `zscore_fit(X) -> (mu: np.ndarray, sigma: np.ndarray)`
+---
 
-**Opis:** Liczy średnią i odchylenie standardowe (ddof=0); sigma==0 → 1.0.
+## 10. Możliwe rozszerzenia
 
-#### Parametry i zwracane wartości
+1. **Rozbudowa modelu MLP**:
+   - strojenie hiperparametrów (liczba warstw, neuronów, współczynnika uczenia),
+   - porównanie z innymi modelami (Random Forest, XGBoost, SVM).
 
-- Patrz sygnatura oraz opisy powyżej.
+2. **Zaawansowana interpretowalność**:
+   - wykorzystanie SHAP / LIME do wyjaśniania predykcji MLP,
+   - wizualizacja wpływu poszczególnych cech na wynik.
 
-#### Złożoność obliczeniowa
+3. **Rozbudowa silnika fuzzy**:
+   - dodanie większej liczby reguł,
+   - automatyczna identyfikacja reguł (np. na podstawie danych),
+   - dynamiczna regulacja funkcji przynależności.
 
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
+4. **Walidacja krzyżowa i raporty**:
+   - k-fold cross‑validation,
+   - generowanie raportów (np. PDF) z wynikami, krzywymi ROC itd.
 
-#### Przykład użycia
+5. **Integracja z innymi danymi**:
+   - połączenie z danymi obrazowymi (USG),
+   - integracja danych z innych ośrodków.
 
-```python
-from core.preprocess import zscore_fit
-# ... uzupełnij własnymi danymi ...
-```
+---
 
-#### Błędy i pułapki
+## 11. Podsumowanie
 
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
+Projekt **Gallstone AI Lab** prezentuje kompletną ścieżkę:
 
-### API: `core.preprocess.zscore_transform`
+1. Praca na rzeczywistym zbiorze klinicznym (Gallstone – UCI).
+2. Zastosowanie klasycznego modelu uczenia maszynowego (MLP).
+3. Zastosowanie alternatywnego, interpretowalnego modelu fuzzy.
+4. Integracja wszystkiego w jedną, prostą w obsłudze aplikację z GUI.
 
-**Rodzaj:** function
+Dzięki temu projekt może być wykorzystywany:
 
-**Sygnatura:** `zscore_transform(X, mu, sigma) -> np.ndarray`
+- jako **materiał na zajęcia uczelniane** (systemy ekspertowe, logika rozmyta, podstawy AI w medycynie),
+- jako **pokazowy projekt** na prezentacje / portfolio,
+- jako punkt wyjścia do dalszych badań i rozszerzeń w kierunku medycznych systemów wspomagania decyzji (CDSS – *Clinical Decision Support Systems*).
 
-**Opis:** Z-score: (X - mu)/sigma, działa na macierzach.
-
-#### Parametry i zwracane wartości
-
-- Patrz sygnatura oraz opisy powyżej.
-
-#### Złożoność obliczeniowa
-
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
-
-#### Przykład użycia
-
-```python
-from core.preprocess import zscore_transform
-# ... uzupełnij własnymi danymi ...
-```
-
-#### Błędy i pułapki
-
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
-
-### API: `core.metrics.safe_trapezoid`
-
-**Rodzaj:** function
-
-**Sygnatura:** `safe_trapezoid(y, x) -> float`
-
-**Opis:** Pole pod krzywą metodą trapezów; zgodność z różnymi NumPy.
-
-#### Parametry i zwracane wartości
-
-- Patrz sygnatura oraz opisy powyżej.
-
-#### Złożoność obliczeniowa
-
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
-
-#### Przykład użycia
-
-```python
-from core.metrics import safe_trapezoid
-# ... uzupełnij własnymi danymi ...
-```
-
-#### Błędy i pułapki
-
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
-
-### API: `core.metrics.sigmoid`
-
-**Rodzaj:** function
-
-**Sygnatura:** `sigmoid(z) -> np.ndarray`
-
-**Opis:** Funkcja aktywacji wyjścia; numerycznie stabilna w typowym zakresie.
-
-#### Parametry i zwracane wartości
-
-- Patrz sygnatura oraz opisy powyżej.
-
-#### Złożoność obliczeniowa
-
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
-
-#### Przykład użycia
-
-```python
-from core.metrics import sigmoid
-# ... uzupełnij własnymi danymi ...
-```
-
-#### Błędy i pułapki
-
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
-
-### API: `core.metrics.bce_loss`
-
-**Rodzaj:** function
-
-**Sygnatura:** `bce_loss(y_true, y_prob, eps=1e-9) -> float`
-
-**Opis:** Binary Cross-Entropy z przycięciem `y_prob` do [eps,1-eps].
-
-#### Parametry i zwracane wartości
-
-- Patrz sygnatura oraz opisy powyżej.
-
-#### Złożoność obliczeniowa
-
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
-
-#### Przykład użycia
-
-```python
-from core.metrics import bce_loss
-# ... uzupełnij własnymi danymi ...
-```
-
-#### Błędy i pułapki
-
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
-
-### API: `core.metrics.accuracy`
-
-**Rodzaj:** function
-
-**Sygnatura:** `accuracy(y_true, y_pred) -> float`
-
-**Opis:** Dokładność klasyfikacji.
-
-#### Parametry i zwracane wartości
-
-- Patrz sygnatura oraz opisy powyżej.
-
-#### Złożoność obliczeniowa
-
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
-
-#### Przykład użycia
-
-```python
-from core.metrics import accuracy
-# ... uzupełnij własnymi danymi ...
-```
-
-#### Błędy i pułapki
-
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
-
-### API: `core.metrics.confusion`
-
-**Rodzaj:** function
-
-**Sygnatura:** `confusion(y_true, y_pred) -> (tp, fp, fn, tn, tpr, fpr, prec, rec)`
-
-**Opis:** Zwraca podstawowe składowe i metryki z macierzy pomyłek.
-
-#### Parametry i zwracane wartości
-
-- Patrz sygnatura oraz opisy powyżej.
-
-#### Złożoność obliczeniowa
-
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
-
-#### Przykład użycia
-
-```python
-from core.metrics import confusion
-# ... uzupełnij własnymi danymi ...
-```
-
-#### Błędy i pułapki
-
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
-
-### API: `core.metrics.roc_curve_vals`
-
-**Rodzaj:** function
-
-**Sygnatura:** `roc_curve_vals(y_true, y_score, num=200) -> (FPR, TPR)`
-
-**Opis:** Generuje punkty ROC dla siatki progów [0,1].
-
-#### Parametry i zwracane wartości
-
-- Patrz sygnatura oraz opisy powyżej.
-
-#### Złożoność obliczeniowa
-
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
-
-#### Przykład użycia
-
-```python
-from core.metrics import roc_curve_vals
-# ... uzupełnij własnymi danymi ...
-```
-
-#### Błędy i pułapki
-
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
-
-### API: `core.metrics.pr_curve_vals`
-
-**Rodzaj:** function
-
-**Sygnatura:** `pr_curve_vals(y_true, y_score, num=200) -> (REC, PREC)`
-
-**Opis:** Generuje punkty PR (Recall, Precision).
-
-#### Parametry i zwracane wartości
-
-- Patrz sygnatura oraz opisy powyżej.
-
-#### Złożoność obliczeniowa
-
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
-
-#### Przykład użycia
-
-```python
-from core.metrics import pr_curve_vals
-# ... uzupełnij własnymi danymi ...
-```
-
-#### Błędy i pułapki
-
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
-
-### API: `core.metrics.binned_reliability`
-
-**Rodzaj:** function
-
-**Sygnatura:** `binned_reliability(y_true, y_prob, bins=10) -> (mids, acc, cnt)`
-
-**Opis:** Dane do wykresu kalibracji (reliability diagram).
-
-#### Parametry i zwracane wartości
-
-- Patrz sygnatura oraz opisy powyżej.
-
-#### Złożoność obliczeniowa
-
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
-
-#### Przykład użycia
-
-```python
-from core.metrics import binned_reliability
-# ... uzupełnij własnymi danymi ...
-```
-
-#### Błędy i pułapki
-
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
-
-### API: `core.platt.fit_platt`
-
-**Rodzaj:** function
-
-**Sygnatura:** `fit_platt(y_true, y_score, max_iter=100, tol=1e-6) -> (a, b)`
-
-**Opis:** Uczenie parametrów kalibracji Platta metodą Newtona (2x2).
-
-#### Parametry i zwracane wartości
-
-- Patrz sygnatura oraz opisy powyżej.
-
-#### Złożoność obliczeniowa
-
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
-
-#### Przykład użycia
-
-```python
-from core.platt import fit_platt
-# ... uzupełnij własnymi danymi ...
-```
-
-#### Błędy i pułapki
-
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
-
-### API: `core.platt.apply_platt`
-
-**Rodzaj:** function
-
-**Sygnatura:** `apply_platt(y_score, a, b) -> np.ndarray`
-
-**Opis:** Zastosowanie skalowania: sigma(a*s+b).
-
-#### Parametry i zwracane wartości
-
-- Patrz sygnatura oraz opisy powyżej.
-
-#### Złożoność obliczeniowa
-
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
-
-#### Przykład użycia
-
-```python
-from core.platt import apply_platt
-# ... uzupełnij własnymi danymi ...
-```
-
-#### Błędy i pułapki
-
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
-
-### API: `core.mlp.MLPModel.__init__`
-
-**Rodzaj:** method
-
-**Sygnatura:** `MLPModel(n_in, n_hidden=(16,8), lr=1e-3, epochs=200, batch_size=32, activation='relu', l2=0.0, seed=42)`
-
-**Opis:** Buduje model z inicjalizacją He/Xavier odpowiednio do architektury.
-
-#### Parametry i zwracane wartości
-
-- Patrz sygnatura oraz opisy powyżej.
-
-#### Złożoność obliczeniowa
-
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
-
-#### Przykład użycia
-
-```python
-from core.mlp import MLPModel
-# ... uzupełnij własnymi danymi ...
-```
-
-#### Błędy i pułapki
-
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
-
-### API: `core.mlp.MLPModel._act`
-
-**Rodzaj:** method
-
-**Sygnatura:** `_act(z) -> np.ndarray`
-
-**Opis:** Zwraca ReLU lub tanh w zależności od ustawienia.
-
-#### Parametry i zwracane wartości
-
-- Patrz sygnatura oraz opisy powyżej.
-
-#### Złożoność obliczeniowa
-
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
-
-#### Przykład użycia
-
-```python
-from core.mlp import MLPModel
-# ... uzupełnij własnymi danymi ...
-```
-
-#### Błędy i pułapki
-
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
-
-### API: `core.mlp.MLPModel._act_grad`
-
-**Rodzaj:** method
-
-**Sygnatura:** `_act_grad(z) -> np.ndarray`
-
-**Opis:** Pochodna ReLU/tanh dla backprop.
-
-#### Parametry i zwracane wartości
-
-- Patrz sygnatura oraz opisy powyżej.
-
-#### Złożoność obliczeniowa
-
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
-
-#### Przykład użycia
-
-```python
-from core.mlp import MLPModel
-# ... uzupełnij własnymi danymi ...
-```
-
-#### Błędy i pułapki
-
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
-
-### API: `core.mlp.MLPModel.forward`
-
-**Rodzaj:** method
-
-**Sygnatura:** `forward(X) -> (y, cache)`
-
-**Opis:** Przepływ w przód; cache zawiera aktywacje na potrzeby backward.
-
-#### Parametry i zwracane wartości
-
-- Patrz sygnatura oraz opisy powyżej.
-
-#### Złożoność obliczeniowa
-
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
-
-#### Przykład użycia
-
-```python
-from core.mlp import MLPModel
-# ... uzupełnij własnymi danymi ...
-```
-
-#### Błędy i pułapki
-
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
-
-### API: `core.mlp.MLPModel.backward`
-
-**Rodzaj:** method
-
-**Sygnatura:** `backward(cache, y_true) -> None`
-
-**Opis:** Backprop + aktualizacja wag (mini-batch SGD) z L2.
-
-#### Parametry i zwracane wartości
-
-- Patrz sygnatura oraz opisy powyżej.
-
-#### Złożoność obliczeniowa
-
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
-
-#### Przykład użycia
-
-```python
-from core.mlp import MLPModel
-# ... uzupełnij własnymi danymi ...
-```
-
-#### Błędy i pułapki
-
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
-
-### API: `core.mlp.MLPModel.one_epoch`
-
-**Rodzaj:** method
-
-**Sygnatura:** `one_epoch(X, y) -> None`
-
-**Opis:** Losowanie indeksów; pętle po batchach; forward/backward.
-
-#### Parametry i zwracane wartości
-
-- Patrz sygnatura oraz opisy powyżej.
-
-#### Złożoność obliczeniowa
-
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
-
-#### Przykład użycia
-
-```python
-from core.mlp import MLPModel
-# ... uzupełnij własnymi danymi ...
-```
-
-#### Błędy i pułapki
-
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
-
-### API: `core.mlp.MLPModel.predict_proba`
-
-**Rodzaj:** method
-
-**Sygnatura:** `predict_proba(X) -> np.ndarray`
-
-**Opis:** Zwraca wektor prawdopodobieństw klasy pozytywnej.
-
-#### Parametry i zwracane wartości
-
-- Patrz sygnatura oraz opisy powyżej.
-
-#### Złożoność obliczeniowa
-
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
-
-#### Przykład użycia
-
-```python
-from core.mlp import MLPModel
-# ... uzupełnij własnymi danymi ...
-```
-
-#### Błędy i pułapki
-
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
-
-### API: `core.mlp.MLPModel.predict`
-
-**Rodzaj:** method
-
-**Sygnatura:** `predict(X, threshold=0.5) -> np.ndarray[int]`
-
-**Opis:** Zwraca predykcję etykiet przy zadanym progu.
-
-#### Parametry i zwracane wartości
-
-- Patrz sygnatura oraz opisy powyżej.
-
-#### Złożoność obliczeniowa
-
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
-
-#### Przykład użycia
-
-```python
-from core.mlp import MLPModel
-# ... uzupełnij własnymi danymi ...
-```
-
-#### Błędy i pułapki
-
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
-
-### API: `core.trainer.Trainer.__init__`
-
-**Rodzaj:** method
-
-**Sygnatura:** `Trainer(model, Xtr, ytr, Xte=None, yte=None, use_es=True, patience=20, use_step_lr=False, step_every=50, gamma=0.5, on_epoch=None, on_done=None, stop_flag=None)`
-
-**Opis:** Inicjalizacja trenera z callbackami i opcjami harmonogramu/ES.
-
-#### Parametry i zwracane wartości
-
-- Patrz sygnatura oraz opisy powyżej.
-
-#### Złożoność obliczeniowa
-
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
-
-#### Przykład użycia
-
-```python
-from core.trainer import Trainer
-# ... uzupełnij własnymi danymi ...
-```
-
-#### Błędy i pułapki
-
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
-
-### API: `core.trainer.Trainer.run`
-
-**Rodzaj:** method
-
-**Sygnatura:** `run() -> None`
-
-**Opis:** Główna pętla treningowa + zarządzanie najlepszymi wagami.
-
-#### Parametry i zwracane wartości
-
-- Patrz sygnatura oraz opisy powyżej.
-
-#### Złożoność obliczeniowa
-
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
-
-#### Przykład użycia
-
-```python
-from core.trainer import Trainer
-# ... uzupełnij własnymi danymi ...
-```
-
-#### Błędy i pułapki
-
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
-
-### API: `core.analysis.make_test_table`
-
-**Rodzaj:** function
-
-**Sygnatura:** `make_test_table(Xte, yte, p_te, mu, sigma, features, test_idx=None) -> pd.DataFrame`
-
-**Opis:** Tabela testowa z etykietami, predykcją, progiem i typem błędu.
-
-#### Parametry i zwracane wartości
-
-- Patrz sygnatura oraz opisy powyżej.
-
-#### Złożoność obliczeniowa
-
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
-
-#### Przykład użycia
-
-```python
-from core.analysis import make_test_table
-# ... uzupełnij własnymi danymi ...
-```
-
-#### Błędy i pułapki
-
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
-
-### API: `core.analysis.permutation_importance`
-
-**Rodzaj:** function
-
-**Sygnatura:** `permutation_importance(model, Xte, yte, features, base_probs=None, seed=123) -> list[(feature, delta_auc)]`
-
-**Opis:** Spadek AUC po permutacji kolumny — miara ważności.
-
-#### Parametry i zwracane wartości
-
-- Patrz sygnatura oraz opisy powyżej.
-
-#### Złożoność obliczeniowa
-
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
-
-#### Przykład użycia
-
-```python
-from core.analysis import permutation_importance
-# ... uzupełnij własnymi danymi ...
-```
-
-#### Błędy i pułapki
-
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
-
-### API: `core.plots.plot_loss`
-
-**Rodzaj:** function
-
-**Sygnatura:** `plot_loss(history) -> Figure`
-
-**Opis:** Wykres strat (train/val).
-
-#### Parametry i zwracane wartości
-
-- Patrz sygnatura oraz opisy powyżej.
-
-#### Złożoność obliczeniowa
-
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
-
-#### Przykład użycia
-
-```python
-from core.plots import plot_loss
-# ... uzupełnij własnymi danymi ...
-```
-
-#### Błędy i pułapki
-
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
-
-### API: `core.plots.plot_roc`
-
-**Rodzaj:** function
-
-**Sygnatura:** `plot_roc(y_true, p) -> Figure`
-
-**Opis:** Wykres ROC z AUC.
-
-#### Parametry i zwracane wartości
-
-- Patrz sygnatura oraz opisy powyżej.
-
-#### Złożoność obliczeniowa
-
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
-
-#### Przykład użycia
-
-```python
-from core.plots import plot_roc
-# ... uzupełnij własnymi danymi ...
-```
-
-#### Błędy i pułapki
-
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
-
-### API: `core.plots.plot_pr`
-
-**Rodzaj:** function
-
-**Sygnatura:** `plot_pr(y_true, p) -> Figure`
-
-**Opis:** Wykres Precision–Recall z AUPRC.
-
-#### Parametry i zwracane wartości
-
-- Patrz sygnatura oraz opisy powyżej.
-
-#### Złożoność obliczeniowa
-
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
-
-#### Przykład użycia
-
-```python
-from core.plots import plot_pr
-# ... uzupełnij własnymi danymi ...
-```
-
-#### Błędy i pułapki
-
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
-
-### API: `core.plots.plot_cm_metrics`
-
-**Rodzaj:** function
-
-**Sygnatura:** `plot_cm_metrics(y_true, p, thr) -> Figure`
-
-**Opis:** Macierz pomyłek + słupki metryk dla danego progu.
-
-#### Parametry i zwracane wartości
-
-- Patrz sygnatura oraz opisy powyżej.
-
-#### Złożoność obliczeniowa
-
-- Zależna od rozmiarów wejść. Operacje wektorowe NumPy.
-
-#### Przykład użycia
-
-```python
-from core.plots import plot_cm_metrics
-# ... uzupełnij własnymi danymi ...
-```
-
-#### Błędy i pułapki
-
-- Sprawdź typy i kształty macierzy (`shape`).
-- Upewnij się, że kolumna celu to 0/1 gdzie wymagane.
-
-### Backprop — szkic wyprowadzenia
-
-
-Dla warstwy \\( l \\): \\( z^{(l)} = a^{(l-1)} W^{(l)} + b^{(l)} \\), \\( a^{(l)} = \phi(z^{(l)}) \\).
-Dla wyjścia binarnego: \\( \hat{y} = \sigma(z^{(L)}) \\), strata BCE.  
-Błąd na wyjściu: \\( \delta^{(L)} = \hat{y} - y \\).  
-Dla warstw ukrytych: \\( \delta^{(l)} = (\delta^{(l+1)} {W^{(l+1)}}^\top) \odot \phi'(z^{(l)}) \\).  
-Gradienty: \\( \frac{\partial \mathcal{L}}{\partial W^{(l)}} = {a^{(l-1)}}^\top \delta^{(l)} + \lambda W^{(l)} \\), \\( \frac{\partial \mathcal{L}}{\partial b^{(l)}} = \sum \delta^{(l)} \\).
-
-### Step LR Decay — kiedy używać?
-
-
-- Gdy obserwujesz płaskowyż strat: zmniejszenie LR może pomóc zejść do głębszego minimum.
-- Zbyt agresywne schodki (małe `step_every`, bardzo małe `gamma`) wydłużają trening.
-
-### K-fold CV — wariancja i uśrednianie
-
-
-- Używaj stratyfikacji dla klasy binarnej, aby nie uzyskać foldów bez klasy 1.
-- Raportuj średnią ± odchylenie standardowe dla kluczowych metryk (AUC, ACC).
-
-### Permutation Importance — interpretacja
-
-
-- Duża ΔAUC po permutacji cechy → cecha istotna dla dyskryminacji modelu.
-- Uwaga: zależna od korelacji między cechami; nie jest to „przyczynowość”.
-
-### Kalibracja — praktyka
-
-
-- Ucz na walidacji, zastosuj na teście; unikaj uczenia kalibracji na tych samych danych raportowych.
-- Sprawdź reliability diagram przed i po kalibracji.
-
-## FAQ (krótkie odpowiedzi)
-
-**P1.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P2.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P3.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P4.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P5.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P6.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P7.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P8.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P9.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P10.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P11.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P12.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P13.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P14.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P15.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P16.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P17.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P18.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P19.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P20.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P21.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P22.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P23.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P24.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P25.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P26.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P27.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P28.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P29.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P30.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P31.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P32.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P33.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P34.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P35.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P36.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P37.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P38.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P39.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P40.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P41.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P42.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P43.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P44.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P45.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P46.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P47.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P48.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P49.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-**P50.** Jak dobrać próg decyzyjny? — Użyj suwaka w CM i kieruj się kosztami FP/FN oraz metrykami PR/ROC.
-
-\n'''
+Należy zawsze pamiętać, że **ostateczna decyzja medyczna należy do lekarza**, a tego typu narzędzia mają jedynie charakter pomocniczy i edukacyjny.\n
+'''
