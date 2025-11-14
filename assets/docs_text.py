@@ -1,4 +1,4 @@
-DOCS_TEXT = r'''\
+DOCS_TEXT = r'''
 # Gallstone AI Lab – dokumentacja techniczna
 
 ## 1. Cel projektu i kontekst medyczny
@@ -307,12 +307,13 @@ Definicja:
 \[
 \mu_A(x) =
 \begin{cases}
-0, x \le a \\
-\dfrac{x - a}{b - a}, a < x \le b \\
-\dfrac{c - x}{c - b}, b < x < c \\
-0, x \ge c
+0,  x \le a \\
+\dfrac{x - a}{b - a},   a < x \le b \\
+\dfrac{c - x}{c - b},   b < x < c \\
+0,  x \ge c
 \end{cases}
 \]
+
 
 
 Analogicznie można stosować funkcje trapezowe, gaussowskie itd. W projekcie stosuje się proste **funkcje trójkątne / trapezowe**, które łatwo dobrać i interpretować.
